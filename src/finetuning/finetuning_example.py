@@ -1,11 +1,22 @@
 """
-Example usage of the TimesFM Finetuning Framework.
+Example usage of the TimesFM Finetuning Framework with Transfer Learning Support.
+
+This example demonstrates how to use TimesFM's finetuning capabilities for 
+transfer learning, particularly with the timesfm-1.0-200m checkpoint.
+
+Transfer Learning Modes:
+- Feature extraction: Use pre-trained model as fixed feature extractor
+- Fine-tuning: Adapt all or some layers to your domain
+- Gradual unfreezing: Start frozen and gradually unfreeze layers
 
 For single GPU:
-python script.py --training_mode=single
+python script.py --training_mode=single --transfer_learning_mode=fine_tuning
 
-For multiple GPUs:
-python script.py --training_mode=multi --gpu_ids=0,1,2
+For multiple GPUs with transfer learning:
+python script.py --training_mode=multi --gpu_ids=0,1,2 --transfer_learning_mode=gradual_unfreezing
+
+For transfer learning with timesfm-1.0-200m:
+python script.py --checkpoint_path=google/timesfm-1.0-200m-pytorch --transfer_learning_mode=fine_tuning
 """
 
 import os
@@ -46,6 +57,27 @@ flags.DEFINE_string(
     "local_model_path",
     None,
     "Path to a local .safetensors model file. If provided, overrides Hugging Face download."
+)
+
+flags.DEFINE_enum(
+    "transfer_learning_mode",
+    "fine_tuning",
+    ["feature_extraction", "fine_tuning", "gradual_unfreezing"],
+    "Transfer learning approach: feature_extraction (frozen backbone), "
+    "fine_tuning (adapt all layers), or gradual_unfreezing (progressive training)."
+)
+
+flags.DEFINE_string(
+    "checkpoint_path",
+    "google/timesfm-1.0-200m-pytorch",
+    "Hugging Face checkpoint path. Use 'google/timesfm-1.0-200m-pytorch' or "
+    "'google/timesfm-1.0-200m' for the 200M parameter model."
+)
+
+flags.DEFINE_float(
+    "transfer_learning_lr",
+    1e-4,
+    "Learning rate for transfer learning. Typically lower than training from scratch."
 )
 
 class TimeSeriesDataset(Dataset):
@@ -139,23 +171,50 @@ def prepare_datasets(series: np.ndarray,
 
 
 def get_model(load_weights: bool = False):
+  """
+  Initialize TimesFM model with transfer learning support.
+  
+  This function supports loading various TimesFM checkpoints for transfer learning,
+  including the timesfm-1.0-200m model which is ideal for transfer learning scenarios.
+  """
   device = "cuda" if torch.cuda.is_available() else "cpu"
-  hparams = TimesFmHparams(
-      backend=device,
-      per_core_batch_size=32,
-      horizon_len=128,
-      num_layers=50,
-      use_positional_embedding=False,
-      context_len=192,
-  )
+  
+  # Adjust hyperparameters based on checkpoint
+  if "1.0-200m" in FLAGS.checkpoint_path:
+    # TimesFM 1.0 model configuration
+    hparams = TimesFmHparams(
+        backend=device,
+        per_core_batch_size=32,
+        horizon_len=128,
+        context_len=192,  # Max 512 for 1.0 model
+    )
+  else:
+    # TimesFM 2.0 model configuration (default)
+    hparams = TimesFmHparams(
+        backend=device,
+        per_core_batch_size=32,
+        horizon_len=128,
+        num_layers=50,
+        use_positional_embedding=False,
+        context_len=192,
+    )
+  
+  print(f"Transfer Learning Configuration:")
+  print(f"  Checkpoint: {FLAGS.checkpoint_path}")
+  print(f"  Mode: {FLAGS.transfer_learning_mode}")
+  print(f"  Learning Rate: {FLAGS.transfer_learning_lr}")
+  print(f"  Context Length: {hparams.context_len}")
   
   if load_weights:
     if FLAGS.local_model_path:
+      # Load from local file
       tfm_config = TimesFMConfig()
       model = PatchedTimeSeriesDecoder(tfm_config)
       loaded_checkpoint = load_file(FLAGS.local_model_path)
+      print(f"Loading from local path: {FLAGS.local_model_path}")
     else:
-      repo_id = "google/timesfm-2.0-500m-pytorch"
+      # Load from Hugging Face
+      repo_id = FLAGS.checkpoint_path
       tfm = TimesFm(hparams=hparams,
               checkpoint=TimesFmCheckpoint(huggingface_repo_id=repo_id))
 
@@ -163,8 +222,31 @@ def get_model(load_weights: bool = False):
       model = PatchedTimeSeriesDecoder(tfm_config)
       checkpoint_path = path.join(snapshot_download(repo_id), "torch_model.ckpt")
       loaded_checkpoint = torch.load(checkpoint_path, weights_only=True)
+      print(f"Loading from Hugging Face: {repo_id}")
 
     model.load_state_dict(loaded_checkpoint)
+    
+    # Apply transfer learning configuration
+    if FLAGS.transfer_learning_mode == "feature_extraction":
+      # Freeze backbone for feature extraction
+      for name, param in model.named_parameters():
+        if "head" not in name.lower():  # Keep head trainable
+          param.requires_grad = False
+      print("Applied feature extraction mode: backbone frozen, head trainable")
+      
+    elif FLAGS.transfer_learning_mode == "gradual_unfreezing":
+      # Start with everything frozen except head
+      for name, param in model.named_parameters():
+        if "head" not in name.lower():
+          param.requires_grad = False
+      print("Applied gradual unfreezing mode: start with backbone frozen")
+      
+    else:  # fine_tuning
+      # All parameters trainable
+      for param in model.parameters():
+        param.requires_grad = True
+      print("Applied fine-tuning mode: all parameters trainable")
+  
   return model, hparams, tfm_config
 
 
@@ -267,33 +349,42 @@ def get_data(context_len: int,
 
 
 def single_gpu_example():
-  """Basic example of finetuning TimesFM on stock data."""
+  """Transfer learning example using TimesFM with single GPU."""
   model, hparams, tfm_config = get_model(load_weights=True)
-  config = FinetuningConfig(batch_size=256,
-                            num_epochs=5,
-                            learning_rate=1e-4,
-                            use_wandb=True,
-                            freq_type=1,
-                            log_every_n_steps=10,
-                            val_check_interval=0.5,
-                            use_quantile_loss=True)
+  
+  # Use transfer learning learning rate from flags
+  config = FinetuningConfig(
+      batch_size=256,
+      num_epochs=5,
+      learning_rate=FLAGS.transfer_learning_lr,  # Use transfer learning LR
+      use_wandb=True,
+      freq_type=1,
+      log_every_n_steps=10,
+      val_check_interval=0.5,
+      use_quantile_loss=True
+  )
+
+  print(f"\nTransfer Learning Configuration:")
+  print(f"  Mode: {FLAGS.transfer_learning_mode}")
+  print(f"  Learning Rate: {config.learning_rate}")
+  print(f"  Checkpoint: {FLAGS.checkpoint_path}")
 
   train_dataset, val_dataset = get_data(128,
                                         tfm_config.horizon_len,
                                         freq_type=config.freq_type)
   finetuner = TimesFMFinetuner(model, config)
 
-  print("\nStarting finetuning...")
+  print("\nStarting transfer learning...")
   results = finetuner.finetune(train_dataset=train_dataset,
                                val_dataset=val_dataset)
 
-  print("\nFinetuning completed!")
+  print("\nTransfer learning completed!")
   print(f"Training history: {len(results['history']['train_loss'])} epochs")
 
   plot_predictions(
       model=model,
       val_dataset=val_dataset,
-      save_path="timesfm_predictions.png",
+      save_path="timesfm_transfer_learning_predictions.png",
   )
 
 
@@ -333,25 +424,32 @@ def setup_process(rank, world_size, model, config, train_dataset, val_dataset,
 
 
 def multi_gpu_example():
-  """Example of finetuning TimesFM using multiple GPUs with optimized spawn."""
+  """Transfer learning example using TimesFM with multiple GPUs."""
   mp.set_start_method("spawn", force=True)
 
-  gpu_ids = [0, 1]
+  gpu_ids = [int(id) for id in FLAGS.gpu_ids]
   world_size = len(gpu_ids)
 
   model, hparams, tfm_config = get_model(load_weights=True)
 
-  # Create config
+  # Create transfer learning config
   config = FinetuningConfig(
       batch_size=256,
       num_epochs=5,
-      learning_rate=3e-5,
+      learning_rate=FLAGS.transfer_learning_lr,  # Use transfer learning LR
       use_wandb=True,
       distributed=True,
       gpu_ids=gpu_ids,
       log_every_n_steps=50,
       val_check_interval=0.5,
   )
+  
+  print(f"\nMulti-GPU Transfer Learning Configuration:")
+  print(f"  Mode: {FLAGS.transfer_learning_mode}")
+  print(f"  Learning Rate: {config.learning_rate}")
+  print(f"  Checkpoint: {FLAGS.checkpoint_path}")
+  print(f"  GPUs: {gpu_ids}")
+  
   train_dataset, val_dataset = get_data(128, tfm_config.horizon_len)
   manager = mp.Manager()
   return_dict = manager.dict()
@@ -365,35 +463,37 @@ def multi_gpu_example():
   )
 
   results = return_dict.get("results", None)
-  print("\nFinetuning completed!")
+  print("\nMulti-GPU transfer learning completed!")
   return results
 
 
 def main(argv):
-  """Main function that selects and runs the appropriate training mode."""
+  """Main function that selects and runs the appropriate transfer learning mode."""
+  
+  print("TimesFM Transfer Learning Framework")
+  print("=" * 50)
+  print(f"Checkpoint: {FLAGS.checkpoint_path}")
+  print(f"Transfer Learning Mode: {FLAGS.transfer_learning_mode}")
+  print(f"Learning Rate: {FLAGS.transfer_learning_lr}")
+  print(f"Training Mode: {FLAGS.training_mode}")
+  print("=" * 50)
 
   try:
     if FLAGS.training_mode == "single":
-      print("\nStarting single-GPU training...")
+      print("\nStarting single-GPU transfer learning...")
       single_gpu_example()
     else:
       gpu_ids = [int(id) for id in FLAGS.gpu_ids]
-      print(f"\nStarting multi-GPU training using GPUs: {gpu_ids}...")
-
-      config = FinetuningConfig(
-          batch_size=256,
-          num_epochs=5,
-          learning_rate=3e-5,
-          use_wandb=True,
-          distributed=True,
-          gpu_ids=gpu_ids,
-      )
-
-      results = multi_gpu_example(config)
-      print("\nMulti-GPU training completed!")
+      print(f"\nStarting multi-GPU transfer learning using GPUs: {gpu_ids}...")
+      multi_gpu_example()
 
   except Exception as e:
-    print(f"Training failed: {str(e)}")
+    print(f"Transfer learning failed: {str(e)}")
+    print("\nCommon issues:")
+    print("- Ensure TimesFM dependencies are installed")
+    print("- Check that the specified checkpoint is available")
+    print("- Verify GPU availability if using GPU backend")
+    print("- For timesfm-1.0-200m, ensure context_len <= 512")
   finally:
     if torch.distributed.is_initialized():
       torch.distributed.destroy_process_group()

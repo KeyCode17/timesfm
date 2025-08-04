@@ -33,3 +33,15 @@ except Exception as _:
     from timesfm.timesfm_torch import TimesFmTorch as TimesFm
 
     print(f"Loaded PyTorch TimesFM, likely because python version is {sys.version}.")
+
+# Transfer learning utilities
+try:
+    from timesfm.transfer_learning import (
+        TransferLearningConfig,
+        TimesFM200mTransferLearner,
+        create_transfer_learning_config,
+        setup_timesfm_1_0_200m_transfer_learning,
+    )
+    print("Transfer learning utilities available.")
+except ImportError as e:
+    print(f"Transfer learning utilities not available: {e}")

@@ -291,9 +291,74 @@ In this example, besides the `Daily_sales`, we also have covariates `Category`, 
 
 We can now provide the past data of the two products along with static and dynamic covariates as a batch input to TimesFM and produce forecasts that take into the account the covariates. To learn more, check out the example in [notebooks/covariates.ipynb](https://github.com/google-research/timesfm/blob/master/notebooks/covariates.ipynb).
 
+## Transfer Learning with TimesFM-1.0-200m
+
+The timesfm-1.0-200m checkpoint is perfect for transfer learning on your domain-specific time series data. Transfer learning allows you to leverage the knowledge learned from large-scale pretraining and adapt it to your specific use case.
+
+### When to Use Transfer Learning
+
+Transfer learning with timesfm-1.0-200m is particularly beneficial when:
+- You have limited training data but want to leverage large-scale pre-training
+- Your data has domain-specific patterns not fully captured by the general model
+- You want to improve accuracy on your specific forecasting task
+- You need faster convergence compared to training from scratch
+
+### Transfer Learning Approaches
+
+1. **Feature Extraction**: Use the pre-trained model as a fixed feature extractor
+2. **Fine-tuning**: Update all or some layers of the pre-trained model on your data
+3. **Gradual Unfreezing**: Start with frozen layers and gradually unfreeze during training
+
+### Quick Start
+
+```python
+import timesfm
+
+# Load timesfm-1.0-200m for transfer learning
+tfm = timesfm.TimesFm(
+    hparams=timesfm.TimesFmHparams(
+        backend="gpu",
+        per_core_batch_size=32,
+        horizon_len=96,
+        context_len=256,  # Up to 512 for 1.0 model
+    ),
+    checkpoint=timesfm.TimesFmCheckpoint(
+        huggingface_repo_id="google/timesfm-1.0-200m-pytorch"  # or "google/timesfm-1.0-200m" for JAX
+    ),
+)
+
+# Use for immediate forecasting (zero-shot transfer)
+forecast, _ = tfm.forecast(your_time_series, freq=[0])
+
+# Or fine-tune on your data using the finetuning framework
+from finetuning.finetuning_torch import TimesFMFinetuner, FinetuningConfig
+
+config = FinetuningConfig(
+    learning_rate=1e-4,  # Lower learning rate for transfer learning
+    num_epochs=10,
+    batch_size=16,
+)
+
+finetuner = TimesFMFinetuner(model=tfm, config=config)
+# ... proceed with fine-tuning
+```
+
+### Complete Transfer Learning Guide
+
+For a comprehensive guide on transfer learning with timesfm-1.0-200m, including:
+- Choosing the right strategy based on your dataset size and domain
+- Data preparation best practices
+- Configuration for different scenarios
+- Evaluation and validation techniques
+
+See our dedicated [Transfer Learning Notebook](https://github.com/google-research/timesfm/blob/master/notebooks/transfer_learning.ipynb).
+
 ## Finetuning
 
-We have provided an example of finetuning the model on a new dataset in [notebooks/finetuning.ipynb](https://github.com/google-research/timesfm/blob/master/notebooks/finetuning.ipynb).
+We have provided examples of finetuning the model on new datasets:
+- [General Finetuning (JAX)](https://github.com/google-research/timesfm/blob/master/notebooks/finetuning.ipynb)
+- [PyTorch Finetuning](https://github.com/google-research/timesfm/blob/master/notebooks/finetuning_torch.ipynb)
+- [Transfer Learning Guide](https://github.com/google-research/timesfm/blob/master/notebooks/transfer_learning.ipynb)
 
 ## Contribution Style guide
 
